@@ -89,7 +89,7 @@ for (const it of $('기간 계산').all()) {
   if (/^\d{4}-\d{2}$/.test(m)) months.add(m);
 }
 
-// 5) 매월 13개 조합을 모두 출력 (네이버 리포트와 동일)
+// 5) 매월 13개 조합을 모두 출력
 const AGES = ['10대 이하', '20대', '30대', '40대', '50대', '60대 이상'];
 const COMBOS = [];
 for (const g of ['남성', '여성']) for (const a of AGES) COMBOS.push([g, a]);
