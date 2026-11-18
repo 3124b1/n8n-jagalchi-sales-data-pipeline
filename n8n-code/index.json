@@ -1,0 +1,51 @@
+[
+  {
+    "node": "품목 단위 정리",
+    "file": "01-cafe24-order-items.js"
+  },
+  {
+    "node": "기간 계산1",
+    "file": "02-order-date-ranges.js"
+  },
+  {
+    "node": "칼럼 선택·기본 정리",
+    "file": "03-naver-order-items.js"
+  },
+  {
+    "node": "기간 계산",
+    "file": "04-customer-date-ranges.js"
+  },
+  {
+    "node": "회원ID 목록 추출",
+    "file": "05-member-id-batches.js"
+  },
+  {
+    "node": "KPI4 집계 (월×연령×성별)",
+    "file": "06-monthly-customer-kpi.js"
+  },
+  {
+    "node": "통합 변환 (카페24)",
+    "file": "07-cafe24-unified.js"
+  },
+  {
+    "node": "통합 변환 (네이버)",
+    "file": "08-naver-unified.js"
+  },
+  {
+    "node": "Code in JavaScript1",
+    "file": "09-daily-visits-sales.js"
+  },
+  {
+    "node": "Code",
+    "file": "10-visitor-target-date.js"
+  },
+  {
+    "node": "날짜 목록",
+    "file": "11-domain-target-date.js"
+  },
+  {
+    "node": "Code in JavaScript",
+    "file": "12-domain-join.js"
+  }
+]
+

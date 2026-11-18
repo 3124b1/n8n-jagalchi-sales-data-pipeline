@@ -1,0 +1,1704 @@
+{
+  "name": "자갈치오지매 통합 데이터 수집 파이프라인 · 공개 검토본",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// ===== 카페24: 주문 수집 + 전처리 (최종) =====\nconst pages = $('주문 조회1').all();\nlet orders = [];\nfor (const p of pages) {\n  const arr = Array.isArray(p.json.orders) ? p.json.orders : [];\n  orders = orders.concat(arr);\n}\n\nconst num = (v) => { const n = Number(v); return isNaN(n) ? 0 : n; };\n\n// 규칙 1: 이모지, 영문, ',', '.' 제거\nconst clean = (s) => String(s == null ? '' : s)\n  .replace(/[A-Za-z]/g, '')\n  .replace(/[\\p{Extended_Pictographic}\\uFE0F\\u200D]/gu, '')\n  .replace(/[,.]/g, '')\n  .replace(/\\s{2,}/g, ' ')\n  .trim();\nconst stripEmojiOnly = (s) => String(s == null ? '' : s)\n  .replace(/[\\p{Extended_Pictographic}\\uFE0F\\u200D]/gu, '')\n  .replace(/\\s{2,}/g, ' ')\n  .trim();\n\nconst optVal = (opt, key) => {\n  const m = String(opt == null ? '' : opt).match(new RegExp(key + '[^=]*=\\\\s*([^,]+)'));\n  return m ? m[1].trim() : '';\n};\nconst stripQty = (v) => clean(String(v).replace(/\\([^()]*\\)/g, ' ')).replace(/\\s*1개$/, '').trim();\nconst setVal = (opt) => {\n  let s = String(opt == null ? '' : opt);\n  let i = s.lastIndexOf('='); if (i < 0) return '';\n  s = s.slice(i + 1);\n  i = s.lastIndexOf(':'); if (i >= 0) s = s.slice(i + 1);\n  return clean(s);\n};\n\n// 하드코딩 매핑 (특수 상품 예외)\nconst HARDCODE = [\n  { test: /김스낵 간식 선물세트\\s*\\(\\s*8입\\s*\\)/, name: '김스낵-혼합 8입' }\n];\n\n// 건어물 어종 키워드 — 신규 어종 출시 시 여기에 단어만 추가\n// ⚠ 순서 중요: 긴 이름 먼저 (버터오징어·숏다리가 오징어보다 앞)\nconst DRIED = ['버터오징어', '숏다리', '쥐포', '아귀', '오징어'];\n\n// 상품명 표준화\nconst nameOf = (nameRaw, optRaw) => {\n  for (const h of HARDCODE) { if (h.test.test(nameRaw)) return h.name; }\n  // 콜라보: {X 앞 브랜드명}-{품목}-{수량값}\n  const xm = nameRaw.match(/^(.*?)\\sX\\s/);\n  if (xm) {\n    let brand = clean(xm[1]);\n    if (!brand) brand = stripEmojiOnly(xm[1]);\n    const item = clean(optVal(optRaw, '품목'));\n    let v = stripQty(optVal(optRaw, '수량'));\n    if (brand && item && v) {\n      if (v.startsWith(item + ' ')) v = v.slice(item.length).trim();\n      return brand + '-' + item + '-' + v;\n    }\n    return clean(nameRaw);\n  }\n  const hasSet = nameRaw.includes('세트');\n  const pm = clean(optVal(optRaw, '제품명'));\n  const sv = setVal(optRaw);\n  let n = null;\n  if (nameRaw.includes('김')) {\n    if (hasSet && sv) n = '김스낵-' + sv;\n    else if (!hasSet && pm) n = '김스낵-' + pm;\n  }\n  if (!n && nameRaw.includes('건어물')) {\n    if (hasSet && sv) n = '건어물-' + sv;\n    else if (!hasSet && pm) n = '건어물-' + pm;\n  }\n  // 건어물 키워드 폴백: 상품명에 '건어물'이 없는 단품 대응\n  if (!n && !nameRaw.includes('세트')) {\n    for (const k of DRIED) { if (nameRaw.includes(k)) { n = '건어물-' + k; break; } }\n  }\n  if (!n) n = clean(nameRaw);\n  return n.replace(/선물세트/g, '').replace(/\\s{2,}/g, ' ').replace(/[\\s-]+$/, '').trim();\n};\n\nconst rows = [];\nfor (const o of orders) {\n  const init = o.initial_order_amount || {};\n  const act = o.actual_order_amount || {};\n\n  const totalOrder = num(init.total_amount_due)\n    || (num(init.order_price_amount) + num(init.shipping_fee))\n    || num(o.order_price_amount);\n  const totalPaid = o.payment_amount != null ? num(o.payment_amount) : num(act.payment_amount);\n  const paid = o.paid || '';\n\n  if (paid === 'T' && totalPaid === 0) continue; // 테스트 주문 제거\n  if (paid === 'F') continue;                    // 미결제 제거\n\n  const items = Array.isArray(o.items) ? o.items : [];\n  items.forEach((it, idx) => {\n    const nameRaw = String(it.product_name || it.product_name_default || '');\n    const optRaw = String(it.option_value || '');\n    const unitPrice = num(it.product_price) + num(it.option_price);\n    const qty = num(it.quantity);\n    rows.push({ json: {\n      '주문일': String(o.order_date || '').slice(0, 19).replace('T', ' '),\n      '주문번호': o.order_id || '',\n      '품목별 주문번호': it.order_item_code || ((o.order_id || '') + '-' + String(idx + 1).padStart(2, '0')),\n      '총 주문금액': totalOrder,\n      '총 결제금액': totalPaid,\n      '주문상품명(옵션포함)': nameOf(nameRaw, optRaw),\n      '수량': qty,\n      '판매가': unitPrice,\n      '상품별판매액': unitPrice * qty,\n      '결제구분': paid\n    } });\n  });\n}\n\nrows.sort((a, b) => a.json['주문일'] < b.json['주문일'] ? -1 : a.json['주문일'] > b.json['주문일'] ? 1 : 0);\nreturn rows;"
+      },
+      "id": "public-node-01",
+      "name": "품목 단위 정리",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_DOCUMENT_01",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "CAFE24",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "주문일": "={{ $json['주문일'] }}",
+            "주문번호": "={{ $json['주문번호'] }}",
+            "품목별 주문번호": "={{ $json['품목별 주문번호'] }}",
+            "총 주문금액": "={{ $json['총 주문금액'] }}",
+            "총 결제금액": "={{ $json['총 결제금액'] }}",
+            "주문상품명(옵션포함)": "={{ $json['주문상품명(옵션포함)'] }}",
+            "수량": "={{ $json['수량'] }}",
+            "판매가": "={{ $json['판매가'] }}",
+            "상품별판매액": "={{ $json['상품별판매액'] }}",
+            "결제구분": "={{ $json['결제구분'] }}"
+          },
+          "matchingColumns": [
+            "품목별 주문번호"
+          ],
+          "schema": [
+            {
+              "id": "주문일",
+              "displayName": "주문일",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "주문번호",
+              "displayName": "주문번호",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "품목별 주문번호",
+              "displayName": "품목별 주문번호",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "총 주문금액",
+              "displayName": "총 주문금액",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "총 결제금액",
+              "displayName": "총 결제금액",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "주문상품명(옵션포함)",
+              "displayName": "주문상품명(옵션포함)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "수량",
+              "displayName": "수량",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "판매가",
+              "displayName": "판매가",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "상품별판매액",
+              "displayName": "상품별판매액",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "결제구분",
+              "displayName": "결제구분",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "public-node-02",
+      "name": "시트 기록 (주문데이터)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1104,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 공개 자료 검토 시 중복 삽입된 앞부분을 제거함. 다른 동작은 유지.\nconst BACKFILL_START = '2025-06-01';\nconst BACKFILL_END   = '';\n\nconst fmt = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul' }).format(d);\nconst today = fmt(new Date());\n\nconst isEditorRun = ['manual', 'test'].includes(String($execution.mode));\n\nif (!isEditorRun) {\n  const weekAgo = fmt(new Date(Date.now() - 6 * 86400000));\n  return [{ json: { start_date: weekAgo, end_date: today } }];\n}\n\nconst toUTC = (str) => { const [y, m, d] = str.split('-').map(Number); return Date.UTC(y, m - 1, d, 12); };\nconst toStr = (ms) => new Date(ms).toISOString().slice(0, 10);\nconst DAY = 86400000;\n\nconst endMs = toUTC(BACKFILL_END || today);\nlet sMs = toUTC(BACKFILL_START);\nconst out = [];\nwhile (sMs <= endMs) {\n  const d = new Date(sMs);\n  const monthEndMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0, 12);\n  const chunkEndMs = Math.min(monthEndMs, endMs);\n  out.push({ json: { start_date: toStr(sMs), end_date: toStr(chunkEndMs) } });\n  sMs = chunkEndMs + DAY;\n}\nreturn out;"
+      },
+      "id": "public-node-03",
+      "name": "기간 계산1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://YOUR_MALL_ID.cafe24api.com/api/v2/admin/orders",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "start_date",
+              "value": "={{ $json.start_date }}"
+            },
+            {
+              "name": "end_date",
+              "value": "={{ $json.end_date }}"
+            },
+            {
+              "name": "limit",
+              "value": "100"
+            },
+            {
+              "name": "embed",
+              "value": "items"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 700
+            }
+          },
+          "pagination": {
+            "pagination": {
+              "parameters": {
+                "parameters": [
+                  {
+                    "name": "offset",
+                    "value": "={{ $pageCount * 100 }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.orders || $response.body.orders.length < 100 }}",
+              "limitPagesFetched": true,
+              "maxRequests": 80,
+              "requestInterval": 500
+            }
+          }
+        }
+      },
+      "id": "public-node-04",
+      "name": "주문 조회1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        672,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 5
+            }
+          ]
+        }
+      },
+      "id": "public-node-05",
+      "name": "매일 05:00 실행",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -96,
+        912
+      ]
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_DOCUMENT_01",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "NAVER",
+          "mode": "name"
+        },
+        "event": "rowAdded",
+        "options": {}
+      },
+      "id": "public-node-06",
+      "name": "RAW 행 추가 감지",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [
+        448,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== 네이버: 칼럼 선택 + 행 필터 + 상품명 전처리 (최종) =====\nconst num = (v) => { const n = Number(v); return isNaN(n) ? 0 : n; };\n\nconst normDT = (v) => {\n  if (v == null || v === '') return '';\n  if (typeof v === 'number' && v > 20000) {\n    return new Date(Math.round((v - 25569) * 86400000)).toISOString().slice(0, 19).replace('T', ' ');\n  }\n  const s = String(v).trim();\n  const m = s.match(/(\\d{4})[.\\-\\/\\s]+(\\d{1,2})[.\\-\\/\\s]+(\\d{1,2})/);\n  if (m) {\n    const time = (s.match(/\\d{1,2}:\\d{2}(:\\d{2})?/) || [''])[0];\n    return m[1] + '-' + m[2].padStart(2, '0') + '-' + m[3].padStart(2, '0') + (time ? ' ' + time : '');\n  }\n  return s;\n};\n\nconst clean = (s) => String(s == null ? '' : s)\n  .replace(/[A-Za-z]/g, '')\n  .replace(/[\\p{Extended_Pictographic}\\uFE0F\\u200D]/gu, '')\n  .replace(/[,.]/g, '')\n  .replace(/\\s{2,}/g, ' ')\n  .trim();\n\nconst prodValue = (optRaw) => {\n  const m = String(optRaw == null ? '' : optRaw).match(/제품명\\s*[:=]\\s*([^,\\/|]+)/);\n  return m ? clean(m[1]) : '';\n};\nconst afterLastColon = (optRaw) => {\n  const s = String(optRaw == null ? '' : optRaw);\n  const i = s.lastIndexOf(':');\n  return i >= 0 ? clean(s.slice(i + 1)) : '';\n};\n\n// 하드코딩 매핑 (특수 상품 예외)\nconst HARDCODE = [\n  { test: /김스낵 간식 선물세트\\s*\\(\\s*8입\\s*\\)/, name: '김스낵-혼합 8입' }\n];\n\n// 건어물 어종 키워드 — 신규 어종 출시 시 여기에 단어만 추가 (긴 이름 먼저)\nconst DRIED = ['버터오징어', '숏다리', '쥐포', '아귀', '오징어'];\n\nconst nameOf = (nameRaw, optRaw) => {\n  for (const h of HARDCODE) { if (h.test.test(nameRaw)) return h.name; }\n  const hasSet = nameRaw.includes('세트');\n  let n = null;\n  if (nameRaw.includes('김')) {\n    if (hasSet) { const t = afterLastColon(optRaw); if (t) n = '김스낵-' + t; }\n    else { const v = prodValue(optRaw); if (v) n = '김스낵-' + v; }\n  }\n  if (!n && nameRaw.includes('건어물')) {\n    if (hasSet) { const t = afterLastColon(optRaw); if (t) n = '건어물-' + t; }\n    else { const v = prodValue(optRaw); if (v) n = '건어물-' + v; }\n  }\n  // 건어물 키워드 폴백\n  if (!n && !nameRaw.includes('세트')) {\n    for (const k of DRIED) { if (nameRaw.includes(k)) { n = '건어물-' + k; break; } }\n  }\n  if (!n) n = clean(nameRaw);\n  return n.replace(/선물세트/g, '').replace(/\\s{2,}/g, ' ').replace(/[\\s-]+$/, '').trim();\n};\n\nconst out = [];\nfor (const item of $input.all()) {\n  const r = item.json;\n  const pon = String(r['상품주문번호'] == null ? '' : r['상품주문번호']).trim();\n  if (!pon) continue;\n\n  const claim = String(r['클레임상태'] == null ? '' : r['클레임상태']).trim();\n  if (claim === '취소철회') continue;\n  if (String(r['주문상태'] == null ? '' : r['주문상태']).trim() !== '구매확정') continue;\n\n  const nameRaw = String(r['상품명'] == null ? '' : r['상품명']);\n  const optRaw = String(r['옵션정보'] == null ? '' : r['옵션정보']);\n\n  out.push({ json: {\n    '상품주문번호': pon,\n    '주문일시': normDT(r['주문일시']),\n    '주문상태': String(r['주문상태'] == null ? '' : r['주문상태']).trim(),\n    '클레임상태': claim,\n    '상품명': nameOf(nameRaw, optRaw),\n    '옵션정보': optRaw.trim(),\n    '수량': num(r['수량'])\n  } });\n}\n\nout.sort((a, b) => a.json['주문일시'] < b.json['주문일시'] ? -1 : a.json['주문일시'] > b.json['주문일시'] ? 1 : 0);\nreturn out;"
+      },
+      "id": "public-node-07",
+      "name": "칼럼 선택·기본 정리",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_DOCUMENT_01",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "NAVER",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "상품주문번호"
+          ],
+          "schema": [
+            {
+              "id": "상품주문번호",
+              "displayName": "상품주문번호",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "주문일시",
+              "displayName": "주문일시",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "주문상태",
+              "displayName": "주문상태",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "클레임상태",
+              "displayName": "클레임상태",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "상품명",
+              "displayName": "상품명",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "옵션정보",
+              "displayName": "옵션정보",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "수량",
+              "displayName": "수량",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "public-node-08",
+      "name": "시트 기록 (네이버_주문데이터)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1024,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// KPI4는 '월 단위' 집계이므로 기간도 월 단위로 만든다.\n// 스케줄 실행(production) = 지난달 전체 + 이번 달 1일~오늘 (매일 두 달치를 재집계 → upsert로 덮어씀)\n// 에디터 수동 실행 = BACKFILL_START ~ BACKFILL_END 를 월 단위로 쪼개서 전체 백필\nconst BACKFILL_START = '2025-01-01';\nconst BACKFILL_END   = ''; // 비우면 오늘까지\n\nconst fmt = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul' }).format(d);\nconst today = fmt(new Date());\n\nif ($execution.mode === 'production') {\n  const [y, m] = today.split('-').map(Number);\n  const py = m === 1 ? y - 1 : y;\n  const pm = m === 1 ? 12 : m - 1;\n  const lastDay = new Date(Date.UTC(py, pm, 0, 12)).getUTCDate();\n  const mm = String(pm).padStart(2, '0');\n  return [\n    { json: { start_date: `${py}-${mm}-01`, end_date: `${py}-${mm}-${String(lastDay).padStart(2, '0')}` } },\n    { json: { start_date: today.slice(0, 7) + '-01', end_date: today } }\n  ];\n}\n\n// 월 단위 청크 생성 — 서버 시간대 영향이 없도록 전부 UTC 정오 기준으로 계산\nconst toUTC = (str) => { const [y, m, d] = str.split('-').map(Number); return Date.UTC(y, m - 1, d, 12); };\nconst toStr = (ms) => new Date(ms).toISOString().slice(0, 10);\nconst DAY = 86400000;\n\nconst endMs = toUTC(BACKFILL_END || today);\nlet sMs = toUTC(BACKFILL_START);\nconst out = [];\nwhile (sMs <= endMs) {\n  const d = new Date(sMs);\n  const monthEndMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0, 12);\n  const chunkEndMs = Math.min(monthEndMs, endMs);\n  out.push({ json: { start_date: toStr(sMs), end_date: toStr(chunkEndMs) } });\n  sMs = chunkEndMs + DAY;\n}\nreturn out;"
+      },
+      "id": "public-node-09",
+      "name": "기간 계산",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        432,
+        752
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://YOUR_MALL_ID.cafe24api.com/api/v2/admin/orders",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "start_date",
+              "value": "={{ $json.start_date }}"
+            },
+            {
+              "name": "end_date",
+              "value": "={{ $json.end_date }}"
+            },
+            {
+              "name": "limit",
+              "value": "100"
+            },
+            {
+              "name": "embed",
+              "value": "buyer"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 700
+            }
+          },
+          "pagination": {
+            "pagination": {
+              "parameters": {
+                "parameters": [
+                  {
+                    "name": "offset",
+                    "value": "={{ $pageCount * 100 }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.orders || $response.body.orders.length < 100 }}",
+              "limitPagesFetched": true,
+              "maxRequests": 80,
+              "requestInterval": 500
+            }
+          }
+        }
+      },
+      "id": "public-node-10",
+      "name": "주문 조회",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        656,
+        752
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 주문에서 유효 주문만 남기고, 회원 주문의 member_id 목록을 100개 단위로 묶는다.\n// (customersprivacy는 member_id를 콤마로 최대 100개까지 동시 조회 가능)\nconst pages = $('주문 조회').all();\nlet orders = [];\nfor (const p of pages) {\n  const arr = Array.isArray(p.json.orders) ? p.json.orders : [];\n  orders = orders.concat(arr);\n}\n\nconst num = (v) => { const n = Number(v); return isNaN(n) ? 0 : n; };\nconst memberIds = new Set();\n\nfor (const o of orders) {\n  const act = o.actual_order_amount || {};\n  const totalPaid = o.payment_amount != null ? num(o.payment_amount) : num(act.payment_amount);\n  const paid = o.paid || '';\n  // 전처리: 테스트 주문(T + 0원) / 미결제(F) 제거\n  if (paid === 'T' && totalPaid === 0) continue;\n  if (paid === 'F') continue;\n  if (o.member_id) memberIds.add(String(o.member_id));\n}\n\nconst ids = [...memberIds];\nconst out = [];\nfor (let i = 0; i < ids.length; i += 100) {\n  out.push({ json: { member_ids: ids.slice(i, i + 100).join(',') } });\n}\n// 회원 주문이 하나도 없어도 다음 노드가 실행되도록 더미 1건 유지\nif (out.length === 0) out.push({ json: { member_ids: '' } });\nreturn out;"
+      },
+      "id": "public-node-11",
+      "name": "회원ID 목록 추출",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        752
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://YOUR_MALL_ID.cafe24api.com/api/v2/admin/customersprivacy",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "member_id",
+              "value": "={{ $json.member_ids }}"
+            },
+            {
+              "name": "limit",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 700
+            }
+          }
+        }
+      },
+      "id": "public-node-12",
+      "name": "회원정보 조회 (생년월일·성별)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1088,
+        752
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 주문 × 회원정보 조인 → 월 × 성별 × 연령대 집계 (KPI 4)\n// 네이버 리포트와 동일한 축을 사용한다:\n//  - row_key = 월_성별_연령대 (예: 2026-06_여성_40대)\n//  - 연령대: 10대 이하 / 20대 / 30대 / 40대 / 50대 / 60대 이상 / 알수없음\n//  - 비회원·정보없음(생년월일/성별 미확인)은 모두 '알수없음' 단일 버킷으로 합산\n//  - 매월 13개 조합(남성6+여성6+알수없음1)을 구매가 없어도 0으로 모두 생성\n// PII(생년월일 등)는 시트에 저장하지 않고 여기서 버킷팅 후 폐기한다.\n\n// 1) 회원정보 맵 구성\nconst privPages = $input.all();\nconst memberMap = {};\nfor (const p of privPages) {\n  const arr = (p.json && Array.isArray(p.json.customersprivacy)) ? p.json.customersprivacy : [];\n  for (const c of arr) {\n    if (c.member_id) memberMap[String(c.member_id)] = { birthday: c.birthday || '', gender: c.gender || '' };\n  }\n}\n\n// 2) 주문 로드\nconst pages = $('주문 조회').all();\nlet orders = [];\nfor (const p of pages) {\n  const arr = Array.isArray(p.json.orders) ? p.json.orders : [];\n  orders = orders.concat(arr);\n}\n\nconst num = (v) => { const n = Number(v); return isNaN(n) ? 0 : n; };\nconst genderKo = (g) => {\n  const s = String(g || '').trim().toUpperCase();\n  if (s === 'M' || s === 'MALE' || s === '남' || s === '남성') return '남성';\n  if (s === 'F' || s === 'FEMALE' || s === '여' || s === '여성') return '여성';\n  return '알수없음';\n};\nconst ageBucket = (birthday, orderDate) => {\n  const by = Number(String(birthday).slice(0, 4));\n  const oy = Number(String(orderDate).slice(0, 4));\n  if (!by || !oy || by < 1900) return '알수없음';\n  const age = oy - by; // 연 나이 기준(가정) — 관리자 통계와 오차 가능\n  if (age < 20) return '10대 이하';\n  if (age >= 60) return '60대 이상';\n  return Math.floor(age / 10) * 10 + '대';\n};\n\n// 3) 집계: key = 월|성별|연령\nconst agg = {};\nconst seenOrder = new Set();\nconst monthsWithData = new Set();\nfor (const o of orders) {\n  const oid = o.order_id || '';\n  if (oid && seenOrder.has(oid)) continue; // 페이지 중복 방어\n  if (oid) seenOrder.add(oid);\n\n  const act = o.actual_order_amount || {};\n  const totalPaid = o.payment_amount != null ? num(o.payment_amount) : num(act.payment_amount);\n  const paid = o.paid || '';\n  if (paid === 'T' && totalPaid === 0) continue;\n  if (paid === 'F') continue;\n\n  const month = String(o.order_date || '').slice(0, 7);\n  if (!/^\\d{4}-\\d{2}$/.test(month)) continue;\n  monthsWithData.add(month);\n\n  const mid = o.member_id ? String(o.member_id) : '';\n  let gender = '알수없음', age = '알수없음';\n  if (mid && memberMap[mid]) {\n    gender = genderKo(memberMap[mid].gender);\n    age = ageBucket(memberMap[mid].birthday, o.order_date);\n  }\n  // 네이버와 동일 축 유지: 성별·연령 중 하나라도 모르면 '알수없음' 단일 버킷으로\n  if (gender === '알수없음' || age === '알수없음') { gender = '알수없음'; age = '알수없음'; }\n\n  // 구매자 중복 제거 키: 회원ID > 이메일 > 이름+연락처 > 주문번호\n  const b = o.buyer || {};\n  const buyerKey = mid\n    || b.email || o.member_email || o.buyer_email\n    || ((b.name || o.buyer_name) ? (b.name || o.buyer_name) + '|' + (b.cellphone || b.phone || o.buyer_cellphone || '') : oid);\n\n  const key = month + '|' + gender + '|' + age;\n  if (!agg[key]) agg[key] = { buyers: new Set(), orderCnt: 0, amount: 0 };\n  agg[key].buyers.add(buyerKey);\n  agg[key].orderCnt += 1;\n  agg[key].amount += totalPaid;\n}\n\n// 4) 대상 월 목록: 기간 계산 노드의 월 단위 청크 기준 (주문이 없는 달도 0으로 생성)\nconst months = new Set(monthsWithData);\nfor (const it of $('기간 계산').all()) {\n  const m = String(it.json.start_date || '').slice(0, 7);\n  if (/^\\d{4}-\\d{2}$/.test(m)) months.add(m);\n}\n\n// 5) 매월 13개 조합을 모두 출력 (네이버 리포트와 동일)\nconst AGES = ['10대 이하', '20대', '30대', '40대', '50대', '60대 이상'];\nconst COMBOS = [];\nfor (const g of ['남성', '여성']) for (const a of AGES) COMBOS.push([g, a]);\nCOMBOS.push(['알수없음', '알수없음']);\n\nconst now = new Date().toISOString();\nconst rows = [];\nfor (const m of [...months].sort()) {\n  for (const [g, a] of COMBOS) {\n    const v = agg[m + '|' + g + '|' + a];\n    rows.push({ json: {\n      row_key: [m, g, a].join('_'),\n      data_month: m,\n      age_group: a,\n      gender: g,\n      buyers_count: v ? v.buyers.size : 0,\n      order_count: v ? v.orderCnt : 0,\n      order_amount: v ? v.amount : 0,\n      collected_at: now\n    } });\n  }\n}\nreturn rows;"
+      },
+      "id": "public-node-13",
+      "name": "KPI4 집계 (월×연령×성별)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1312,
+        752
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 카페24 KPI4 집계 결과 → 04_통합 스키마로 변환\n// KPI4 집계 노드가 이미 네이버와 동일한 축(월×성별×연령대, 알수없음 합산, 13개 조합 0채움)으로 출력하므로 그대로 매핑한다.\n// channel='cafe24', visitors_count는 카페24 KPI4에 없으므로 공란\nconst src = $('KPI4 집계 (월×연령×성별)').all();\nconst num = (v) => { const n = Number(v); return isNaN(n) ? 0 : n; };\n\nconst now = new Date().toISOString();\nconst out = src.map((it) => {\n  const d = it.json;\n  return { json: {\n    row_key: [d.data_month, 'cafe24', d.gender, d.age_group].join('_'),\n    data_month: d.data_month,\n    channel: 'cafe24',\n    gender: d.gender,\n    age_group: d.age_group,\n    visitors_count: '',\n    buyers_count: num(d.buyers_count),\n    order_count: num(d.order_count),\n    order_amount: num(d.order_amount),\n    collected_at: now\n  } };\n});\nout.sort((a, b) => (a.json.row_key > b.json.row_key ? 1 : -1));\nreturn out;"
+      },
+      "id": "public-node-14",
+      "name": "통합 변환 (카페24)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        752
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_DOCUMENT_02",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "04_통합",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "row_key"
+          ],
+          "schema": [
+            {
+              "id": "row_key",
+              "displayName": "row_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "data_month",
+              "displayName": "data_month",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "channel",
+              "displayName": "channel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "gender",
+              "displayName": "gender",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "age_group",
+              "displayName": "age_group",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "visitors_count",
+              "displayName": "visitors_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "buyers_count",
+              "displayName": "buyers_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "order_count",
+              "displayName": "order_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "order_amount",
+              "displayName": "order_amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "collected_at",
+              "displayName": "collected_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "public-node-15",
+      "name": "시트 기록 (04_통합_카페24)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1984,
+        752
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_DOCUMENT_02",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "04_네이버",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "public-node-16",
+      "name": "네이버 시트 읽기 (04_네이버)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1984,
+        976
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// 네이버 고객리포트(월 단위, 성별연령) → 04_통합 스키마로 정규화\n// 규칙:\n//  - '날짜'(2025-06-01~2025-06-30) → data_month '2025-06'\n//  - '고객분류'(여성 30대) → gender / age_group 분리, '알수없음'은 둘 다 알수없음\n//  - '전체합산' 행은 제외(이중집계 방지)\n//  - buyers_count=결제고객수, order_amount=판매금액(총), visitors_count=방문고객수, order_count는 네이버에 없어 공란\nconst rows = $input.all();\nconst num = (v) => {\n  if (v === null || v === undefined) return 0;\n  const n = Number(String(v).replace(/[,\\s%원]/g, ''));\n  return isNaN(n) ? 0 : n;\n};\n\nconst now = new Date().toISOString();\nconst out = [];\nfor (const it of rows) {\n  const d = it.json;\n  const cat = String(d['고객분류'] || '').trim();\n  if (!cat || cat === '전체합산') continue;\n\n  const month = String(d['날짜'] || '').slice(0, 7);\n  if (!/^\\d{4}-\\d{2}$/.test(month)) continue;\n\n  let gender = '알수없음', age = '알수없음';\n  if (cat !== '알수없음') {\n    const m = cat.match(/^(남성|여성)\\s*(.+)$/);\n    if (m) { gender = m[1]; age = m[2].trim(); }\n    else { age = cat; }\n  }\n\n  out.push({ json: {\n    row_key: [month, 'naver', gender, age].join('_'),\n    data_month: month,\n    channel: 'naver',\n    gender: gender,\n    age_group: age,\n    visitors_count: num(d['방문고객수']),\n    buyers_count: num(d['결제고객수']),\n    order_count: '',\n    order_amount: num(d['판매금액(총)']),\n    collected_at: now\n  } });\n}\nout.sort((a, b) => (a.json.row_key > b.json.row_key ? 1 : -1));\nreturn out;"
+      },
+      "id": "public-node-17",
+      "name": "통합 변환 (네이버)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2208,
+        976
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_DOCUMENT_02",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "04_통합",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "row_key"
+          ],
+          "schema": [
+            {
+              "id": "row_key",
+              "displayName": "row_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "data_month",
+              "displayName": "data_month",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "channel",
+              "displayName": "channel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "gender",
+              "displayName": "gender",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "age_group",
+              "displayName": "age_group",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "visitors_count",
+              "displayName": "visitors_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "buyers_count",
+              "displayName": "buyers_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "order_count",
+              "displayName": "order_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "order_amount",
+              "displayName": "order_amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "collected_at",
+              "displayName": "collected_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "public-node-18",
+      "name": "시트 기록 (04_통합_네이버)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2432,
+        976
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_DOCUMENT_02",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "04_카페",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "row_key"
+          ],
+          "schema": [
+            {
+              "id": "row_key",
+              "displayName": "row_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "data_month",
+              "displayName": "data_month",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "age_group",
+              "displayName": "age_group",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "gender",
+              "displayName": "gender",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "buyers_count",
+              "displayName": "buyers_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "order_count",
+              "displayName": "order_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "order_amount",
+              "displayName": "order_amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "collected_at",
+              "displayName": "collected_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "public-node-19",
+      "name": "시트 기록",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1536,
+        752
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://ca-api.cafe24data.com/sales/times",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "mall_id",
+              "value": "YOUR_MALL_ID"
+            },
+            {
+              "name": "start_date",
+              "value": "={{ $json.target_date }}"
+            },
+            {
+              "name": "end_date",
+              "value": "={{ $json.target_date }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        656,
+        928
+      ],
+      "id": "public-node-20",
+      "name": "Sales/Times"
+    },
+    {
+      "parameters": {
+        "url": "https://ca-api.cafe24data.com/visitors/view",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "mall_id",
+              "value": "YOUR_MALL_ID"
+            },
+            {
+              "name": "start_date",
+              "value": "={{ $json.target_date }}"
+            },
+            {
+              "name": "end_date",
+              "value": "={{ $json.target_date }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        656,
+        1232
+      ],
+      "id": "public-node-21",
+      "name": "visitors/view"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        928,
+        1072
+      ],
+      "id": "public-node-22",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "jsCode": "const allItems = $input.all();\n\nlet timesArr = [];\nlet viewArr = [];\n\nfor (const it of allItems) {\n  if (Array.isArray(it.json.times)) timesArr = it.json.times;\n  if (Array.isArray(it.json.view)) viewArr = it.json.view;\n}\n\nconst dateVal = $('Code').item.json.target_date;\n\nlet orderCount = 0;\nlet orderAmount = 0;\nfor (const t of timesArr) {\n  orderCount += Number(t.order_count) || 0;\n  orderAmount += Number(t.order_amount) || 0;\n}\n\nconst visitCount = (viewArr.length > 0) ? (Number(viewArr[0].visit_count) || 0) : 0;\n\nreturn [{\n  json: {\n    date: dateVal,\n    visit_count: visitCount,\n    order_count: orderCount,\n    order_amount: orderAmount\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        1072
+      ],
+      "id": "public-node-23",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_DOCUMENT_03",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "cafe24_일별방문자수1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "날짜": "={{ $json.date }}",
+            "방문수": "={{ $json.visit_count }}",
+            "상품결제수": "={{ $json.order_count }}",
+            "판매금액(총)": "={{ $json.order_amount }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "날짜",
+              "displayName": "날짜",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "방문수",
+              "displayName": "방문수",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "상품결제수",
+              "displayName": "상품결제수",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "판매금액(총)",
+              "displayName": "판매금액(총)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1552,
+        1072
+      ],
+      "id": "public-node-24",
+      "name": "Append row in sheet"
+    },
+    {
+      "parameters": {
+        "jsCode": "const yesterday = DateTime.now().minus({ days: 1 }).toFormat('yyyy-MM-dd');\nreturn [{ json: { target_date: yesterday } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        1056
+      ],
+      "id": "public-node-25",
+      "name": "Code"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fmt = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul' }).format(d);\nconst yesterday = fmt(new Date(Date.now() - 86400000));\nreturn [{ json: { date: yesterday } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        1424
+      ],
+      "id": "public-node-26",
+      "name": "날짜 목록"
+    },
+    {
+      "parameters": {
+        "url": "https://ca-api.cafe24data.com/visitpaths/domains",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "mall_id",
+              "value": "YOUR_MALL_ID"
+            },
+            {
+              "name": "start_date",
+              "value": "={{ $('날짜 목록').item.json.date }}"
+            },
+            {
+              "name": "end_date",
+              "value": "={{ $('날짜 목록').item.json.date }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        624,
+        1424
+      ],
+      "id": "public-node-27",
+      "name": "유입 도메인 조회"
+    },
+    {
+      "parameters": {
+        "url": "https://ca-api.cafe24data.com/visitpaths/domainsales",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "mall_id",
+              "value": "YOUR_MALL_ID"
+            },
+            {
+              "name": "start_date",
+              "value": "={{ $('날짜 목록').item.json.date }}"
+            },
+            {
+              "name": "end_date",
+              "value": "={{ $('날짜 목록').item.json.date }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        832,
+        1424
+      ],
+      "id": "public-node-28",
+      "name": "유입 도메인 매출 조회"
+    },
+    {
+      "parameters": {
+        "jsCode": "const dates = $('날짜 목록').all();\nconst doms = $('유입 도메인 조회').all();\nconst domSales = $('유입 도메인 매출 조회').all();\n\nconst num = (v) => { const n = Number(v); return isNaN(n) ? 0 : n; };\nconst firstArray = (obj) => {\n  if (Array.isArray(obj)) return obj;\n  if (obj && typeof obj === 'object') {\n    for (const k of Object.keys(obj)) { const a = firstArray(obj[k]); if (a) return a; }\n  }\n  return null;\n};\nconst domainKey = (r) => r.domain || r.url || r.name || '(직접유입/기타)';\n\nconst rows = [];\ndates.forEach((d, i) => {\n  const date = d.json.date;\n  const list = firstArray(doms[i] && doms[i].json) || [];\n  const salesList = firstArray(domSales[i] && domSales[i].json) || [];\n  const salesBy = {};\n  for (const s of salesList) salesBy[domainKey(s)] = s;\n\n  if (!list.length) {\n    rows.push({ json: {\n      '키': date + '|-', '날짜': date, '유입경로': '', '방문수': '', '구매건수': '', '매출': ''\n    } });\n    return;\n  }\n  for (const r of list) {\n    const k = domainKey(r);\n    const s = salesBy[k] || {};\n    const visits = num(r.visit_count);\n    const purchases = s.purchase_count != null ? num(s.purchase_count) : (s.order_count != null ? num(s.order_count) : '');\n    rows.push({ json: {\n      '키': date + '|' + k,\n      '날짜': date,\n      '유입경로': k,\n      '방문수': visits,\n      '구매건수': purchases,\n      '매출': s.order_amount != null ? Math.round(num(s.order_amount)) : ''\n    } });\n  }\n});\nreturn rows;;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        1424
+      ],
+      "id": "public-node-29",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_DOCUMENT_04",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "cafe24_유입경로&비중",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "키": "={{ $json['키'] }}",
+            "날짜": "={{ $json['날짜'] }}",
+            "유입경로": "={{ $json['유입경로'] }}",
+            "방문수": "={{ $json['방문수'] }}",
+            "구매건수": "={{ $json['구매건수'] }}",
+            "매출": "={{ $json['매출'] }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "키",
+              "displayName": "키",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "날짜",
+              "displayName": "날짜",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "유입경로",
+              "displayName": "유입경로",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "방문수",
+              "displayName": "방문수",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "구매건수",
+              "displayName": "구매건수",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "매출",
+              "displayName": "매출",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1248,
+        1424
+      ],
+      "id": "public-node-30",
+      "name": "Append row in sheet1"
+    },
+    {
+      "parameters": {
+        "content": "# 네이버 주문 붙여넣기시 감지\n",
+        "height": 80,
+        "width": 288
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1248,
+        544
+      ],
+      "typeVersion": 1,
+      "id": "public-node-31",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "# 카페24 주문 자동 수집\n",
+        "height": 80,
+        "width": 272
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1328,
+        368
+      ],
+      "typeVersion": 1,
+      "id": "public-node-32",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "# 방문자 성별 연령/성별 데이터 수집\n",
+        "height": 80,
+        "width": 320
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2192,
+        768
+      ],
+      "typeVersion": 1,
+      "id": "public-node-33",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "# 시간대별 매출 데이터 수집",
+        "height": 80,
+        "width": 272
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1712,
+        1152
+      ],
+      "typeVersion": 1,
+      "id": "public-node-34",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "# 유입 도메인 데이터 수집\n",
+        "height": 80
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1456,
+        1440
+      ],
+      "typeVersion": 1,
+      "id": "public-node-35",
+      "name": "Sticky Note4"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "품목 단위 정리": {
+      "main": [
+        [
+          {
+            "node": "시트 기록 (주문데이터)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "기간 계산1": {
+      "main": [
+        [
+          {
+            "node": "주문 조회1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "주문 조회1": {
+      "main": [
+        [
+          {
+            "node": "품목 단위 정리",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "매일 05:00 실행": {
+      "main": [
+        [
+          {
+            "node": "기간 계산1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "기간 계산",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "날짜 목록",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RAW 행 추가 감지": {
+      "main": [
+        [
+          {
+            "node": "칼럼 선택·기본 정리",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "칼럼 선택·기본 정리": {
+      "main": [
+        [
+          {
+            "node": "시트 기록 (네이버_주문데이터)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "기간 계산": {
+      "main": [
+        [
+          {
+            "node": "주문 조회",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "주문 조회": {
+      "main": [
+        [
+          {
+            "node": "회원ID 목록 추출",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "회원ID 목록 추출": {
+      "main": [
+        [
+          {
+            "node": "회원정보 조회 (생년월일·성별)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "회원정보 조회 (생년월일·성별)": {
+      "main": [
+        [
+          {
+            "node": "KPI4 집계 (월×연령×성별)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "KPI4 집계 (월×연령×성별)": {
+      "main": [
+        [
+          {
+            "node": "시트 기록",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "통합 변환 (카페24)": {
+      "main": [
+        [
+          {
+            "node": "시트 기록 (04_통합_카페24)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "시트 기록 (04_통합_카페24)": {
+      "main": [
+        [
+          {
+            "node": "네이버 시트 읽기 (04_네이버)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "네이버 시트 읽기 (04_네이버)": {
+      "main": [
+        [
+          {
+            "node": "통합 변환 (네이버)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "통합 변환 (네이버)": {
+      "main": [
+        [
+          {
+            "node": "시트 기록 (04_통합_네이버)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "시트 기록": {
+      "main": [
+        [
+          {
+            "node": "통합 변환 (카페24)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sales/Times": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "visitors/view": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "Sales/Times",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "visitors/view",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "날짜 목록": {
+      "main": [
+        [
+          {
+            "node": "유입 도메인 조회",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "유입 도메인 조회": {
+      "main": [
+        [
+          {
+            "node": "유입 도메인 매출 조회",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "유입 도메인 매출 조회": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "nodeGroups": [],
+  "tags": []
+}
+
