@@ -54,5 +54,5 @@
 이 저장소에는 운영 식별정보를 제거한 n8n 워크플로와 데이터 처리 코드를 공개합니다. 실제 고객·주문 데이터와 최종 대시보드 화면은 공개 범위에서 제외했습니다.
 
 - [프로젝트 수행 과정과 개인 역할](docs/01-case-study.md)
-- [데이터 처리 기준과 코드](docs/03-data-processing.md)
+- [데이터 처리 기준과 코드](docs/02-data-processing.md)
 - [공개용 n8n 워크플로 JSON](workflows/main.sanitized.json)
